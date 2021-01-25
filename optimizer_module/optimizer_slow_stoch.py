@@ -12,8 +12,9 @@ class SlowStochOptimizer(object):
     Note:
     スローストキャスティクス売買を仮想で行い、パラメータをグリッドサーチで最適化
     パラメータ
-        :fastD  RSIのspan
-        :slowD  購入する閾値
+        :fastK
+        :slowK
+        :slowD
     """
     def __init__(self):
 
@@ -35,9 +36,9 @@ class SlowStochOptimizer(object):
 
     def _calculate_slow_stoch_profit(self, df, fastk_period: int, slowk_period: int, slowd_period: int) -> float:
         stoch = ta.STOCH(df["High"], df["Low"], df["Close"],
-                         fastk_period=14,
-                         slowk_period=3,
-                         slowd_period=3)
+                         fastk_period=fastk_period,
+                         slowk_period=slowd_period,
+                         slowd_period=slowk_period)
 
         df = pd.DataFrame([df["Close"].to_list(), stoch[0].to_list(), stoch[1].to_list()],
                           columns=stoch[0].index,
@@ -98,7 +99,7 @@ class SlowStochOptimizer(object):
             for slowk in list(range(self._slowk_low, self._slowk_high, 1)):
                 for slowd in list(range(self._slowd_low, self._slowd_high, 1)):
 
-                    sys.stdout.write(f"\r[{i}/{len(list(range(self._fastk_low, self._fastk_high, 1)))-1}] 計算中...")
+                    sys.stdout.write(f"\rSlow Stoch [{i}/{len(list(range(self._fastk_low, self._fastk_high, 1)))-1}] 計算中...")
                     profit = self._calculate_slow_stoch_profit(df, fastk, slowk, slowd)
 
                     result.append([fastk, slowk, slowd, profit])
@@ -122,6 +123,7 @@ class SlowStochOptimizer(object):
         fig = plt.figure(figsize=(20, 8))
 
         plt.subplot(211)
+        plt.title(f"Slow Stoch trade (profit: {self._best_parms['profit']})")
         plt.plot(self.df["Close"][(self._best_parms["slowk"] + self._best_parms["slowk"]):], marker="o")
         plt.grid()
         plt.ylabel("Stock Price[Yen]")
@@ -129,7 +131,7 @@ class SlowStochOptimizer(object):
         plt.subplot(212)
         plt.plot(stoch[0], marker="o")
         plt.plot(stoch[1], marker="o")
-        plt.legend(["Slow-K", "Slow-D"])
+        plt.legend([f"Slow-K {self._best_parms['fastk']}", f"Slow-D {self._best_parms['slowk']}/{self._best_parms['slowd']}"])
         plt.ylabel("Slow-K/D[%]")
         plt.grid()
 

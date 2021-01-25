@@ -7,12 +7,12 @@ import pandas as pd
 import talib as ta
 
 
-class RsiOptimizer(object):
+class WilliamrOptimizer(object):
     """
     Note:
-    RSI売買を仮想で行い、パラメータをグリッドサーチで最適化
+    William %R売買を仮想で行い、パラメータをグリッドサーチで最適化
     パラメータ
-        :span       RSIのspan
+        :span       William %Rのspan
         :buy_thres  購入する閾値
         :sell_thres 売る閾値
     """
@@ -40,29 +40,30 @@ class RsiOptimizer(object):
         """
         set param
         Args:
-            buy_thres(List)  : RSI buy limit[low, high]
-            sell_thres(List) : RSI sell limit[low, high]
-            span_thres(List) : RSI span range[low, high]
+            buy_thres(List)  : William %R buy limit[low, high]
+            sell_thres(List) : William %R sell limit[low, high]
+            span_thres(List) : William %R span range[low, high]
         """
+        self._span_low = spans[0]
+        self._span_high = spans[1]
         self._buy_thres_low = buy_thres[0]
         self._buy_thres_high = buy_thres[1]
         self._sell_thres_low = sell_thres[0]
         self._sell_thres_high = sell_thres[1]
-        self._span_low = spans[0]
-        self._span_high = spans[1]
 
-    def _calculate_rsi_profit(self, df, span: int, low_thres: int, high_thres: int) -> float:
+    def _calculate_willr_profit(self, df, span: int, low_thres: int, high_thres: int) -> float:
         """
         inner function
-        RSIで売買し、その結果利損益を返す
+        William %Rで売買し、その結果利損益を返す
         Args:
             df(pandas Dataframe)   : stock data
-            span(int)              : RSI span
+            span(int)              : William %R span
         Return:
             pl_amount_retio(float) : profit and loss from RSI
         """
-        # set RSI cal data
-        df["RSI"] = ta.RSI(df["Close"], span)
+
+        # set William cal data
+        df["Willr"] = ta.WILLR(df["High"], df["Low"], df["Close"], span)
 
         # Args
         stock = 0
@@ -72,18 +73,18 @@ class RsiOptimizer(object):
         for i in range(len(df)):
 
             # buy
-            if df["RSI"][i] > low_thres and df["RSI"][i - 1] < low_thres:
+            if df["Willr"][i] > low_thres and df["Willr"][i - 1] < low_thres:
                 if asset != 0:
                     stock = asset / df["Close"][i]
                     asset = 0
-                # print(f"buy : {round(df['RSI'][i], 1)} -> {round(df['RSI'][i-1], 1): 5} | stock: {round(stock, 2)}")
+                # print(f"buy : {round(df['Willr'][i], 1)} -> {round(df['Willr'][i-1], 1): 5} | stock: {round(stock, 2)}")
 
             # sell
-            if df["RSI"][i] < high_thres and df["RSI"][i - 1] > high_thres:
+            if df["Willr"][i] < high_thres and df["Willr"][i - 1] > high_thres:
                 if stock != 0:
                     asset = stock * df["Close"][i]
                     stock = 0
-                # print(f"sell: {round(df['RSI'][i], 1)} -> {round(df['RSI'][i-1], 1): 5} | asset: {round(asset, 2)}")
+                # print(f"sell: {round(df['Willr'][i], 1)} -> {round(df['Willr'][i-1], 1): 5} | asset: {round(asset, 2)}")
 
         # If you still have stock, sell it
         last_asset = asset + stock * df["Close"][-1]
@@ -109,8 +110,8 @@ class RsiOptimizer(object):
             for buy in list(range(self._buy_thres_low, self._buy_thres_high, 1)):
                 for sell in list(range(self._sell_thres_low, self._sell_thres_high, 1)):
 
-                    sys.stdout.write(f"\rRSI [{i}/{len(list(range(self._span_low, self._span_high, 1)))-1}] 計算中...")
-                    profit = self._calculate_rsi_profit(df, span, buy, sell)
+                    sys.stdout.write(f"\rWilliam %R [{i}/{len(list(range(self._span_low, self._span_high, 1)))-1}] 計算中...")
+                    profit = self._calculate_willr_profit(df, span, buy, sell)
 
                     result.append([span, buy, sell, profit])
 
@@ -141,17 +142,17 @@ class RsiOptimizer(object):
         fig = plt.figure(figsize=(20, 8))
 
         plt.subplot(211)
-        plt.title(f"RSI trade (profit: {self._best_parms['profit']})")
+        plt.title(f"William %R trade (profit: {self._best_parms['profit']})")
         plt.plot(self.df["Close"], marker="o")
         plt.ylabel("Stock Price[Yen]")
         plt.grid()
 
         plt.subplot(212)
-        plt.plot(ta.RSI(self.df["Close"], self._best_parms["span"]), marker="o")
+        plt.plot(ta.WILLR(self.df["High"], self.df["Low"], self.df["Close"], self._best_parms["span"]), marker="o", color="orange")
         plt.plot(self.df["buy_thres"], linestyle="dashed", color="red")
         plt.plot(self.df["sell_thres"], linestyle="dashed", color="blue")
-        plt.ylabel("RSI[%]")
-        plt.legend([f"RSI {self._best_parms['span']}", f"Buy signal {self._best_parms['buy_thres']}", f"Sell signal {self._best_parms['sell_thres']}"])
+        plt.ylabel(f"William %R[%]")
+        plt.legend([f"WilliamR {self._best_parms['span']}", f"Buy signal {self._best_parms['buy_thres']}", f"Sell signal {self._best_parms['sell_thres']}"])
         plt.grid()
 
         plt.tight_layout()

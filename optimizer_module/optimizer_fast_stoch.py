@@ -1,10 +1,13 @@
 # import libraries
+import concurrent.futures
 import sys
 from typing import List, Dict
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import talib as ta
+
+from chart import chart
 
 
 class FastStochOptimizer(object):
@@ -31,39 +34,46 @@ class FastStochOptimizer(object):
         }
 
     def _calculate_fast_stoch_profit(self, df, fastk_period: int, fastd_period: int) -> float:
-        stoch = ta.STOCHF(df["High"], df["Low"], df["Close"],
+
+        _df = df.copy()
+
+        stoch = ta.STOCHF(_df["High"], _df["Low"], _df["Close"],
                           fastk_period=fastk_period,
                           fastd_period=fastd_period)
 
-        df = pd.DataFrame([df["Close"].to_list(), stoch[0].to_list(), stoch[1].to_list()],
-                          columns=stoch[0].index,
-                          index=["Close", "fastK", "fastD"]).T
+        _df["fastK"] = stoch[0]
+        _df["fastD"] = stoch[1]
+        _df["transaction"] = None
 
         # Args
         stock = 0
         start_asset = 10000
         asset = start_asset
+        last_close_price = 0
 
-        for i in range(len(df)):
+        for i in range(len(_df) - 1):
             # buy
-            if df["fastD"][i] > df["fastK"][i] and df["fastD"][i - 1] < df["fastK"][i - 1]:
+            if _df["fastD"][i] > _df["fastK"][i] and _df["fastD"][i - 1] < _df["fastK"][i - 1]:
                 if asset != 0:
-                    stock = asset / df["Close"][i]
+                    last_close_price = asset
+                    stock = asset / _df["Open"][i + 1]
                     asset = 0
-                # print(f"buy ({df.index[i]}) : {round(df['slowK'][i-1], 1)}/{round(df['slowD'][i-1], 1)} -> {round(df['slowK'][i], 1)}/{round(df['slowD'][i], 1)} | stock: {round(stock, 2)}")
+                    _df["transaction"][i + 1] = "buy"
+                    continue
             # sell
-            if df["fastD"][i] < df["fastK"][i] and df["fastD"][i - 1] > df["fastK"][i - 1]:
+            if _df["fastD"][i] < _df["fastK"][i] and _df["fastD"][i - 1] > _df["fastK"][i - 1]:
                 if stock != 0:
-                    asset = stock * df["Close"][i]
+                    last_close_price = 0
+                    asset = stock * _df["Open"][i + 1]
                     stock = 0
-                # print(f"sell({df.index[i]}) : {round(df['slowK'][i-1], 1)}/{round(df['slowD'][i-1], 1)} -> {round(df['slowK'][i], 1)}/{round(df['slowD'][i], 1)} | asset: {round(asset, 2)}")
+                    _df["transaction"][i + 1] = "sell"
+                    continue
 
         # If you still have stock, sell it
-        last_asset = asset + stock * df["Close"][-1]
+        last_asset = asset + last_close_price
         pl_amount_retio = last_asset / start_asset * 100
-        # print(f"PL Amount: {round(pl_amount_retio, 2)}")
 
-        return pl_amount_retio
+        return pl_amount_retio, _df
 
     def set_params(self,
                    fastk: List[int],
@@ -81,46 +91,52 @@ class FastStochOptimizer(object):
 
     def run(self, df):
 
-        self.df = df
-
         result = []
 
-        # 全パラメータをグリッドサーチ(計算量: Ο[n^3])
-        for i, fastk in enumerate(list(range(self._fastk_low, self._fastk_high, 1))):
-            for fastd in list(range(self._fastd_low, self._fastd_high, 1)):
+        _df = df.copy()
 
-                sys.stdout.write(f"\rFast Stoch [{i}/{len(list(range(self._fastk_low, self._fastk_high, 1)))-1}] 計算中...")
-                profit = self._calculate_fast_stoch_profit(df, fastk, fastd)
+        def inner_thread(fastk):
+
+            sys.stdout.write(f"Thread START FastStoch Span={fastk}\n")
+
+            for fastd in list(range(self._fastd_low, self._fastd_high + 1, 1)):
+
+                profit, r_df = self._calculate_fast_stoch_profit(_df, fastk, fastd)
 
                 result.append([fastk, fastd, profit])
 
                 if profit > self._best_parms["profit"]:
+                    self.df = r_df
                     self._best_parms["fastk"] = fastk
                     self._best_parms["fastd"] = fastd
                     self._best_parms["profit"] = round(profit, 2)
+            return
+
+        # concurrent.futuresでマルチスレッド(並列計算)処理
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            res = executor.map(
+                inner_thread,
+                [j for j in range(self._fastk_low, self._fastk_high + 1, 1)]
+            )
 
         print("\n計算終了")
 
-        return pd.DataFrame(result, columns=["fastk", "fastd", "profit"])
+        return pd.DataFrame(result, columns=["fastk", "fastd", "profit"]).sort_values("profit", ascending=False)
 
     def result_graph(self):
         stochf = ta.STOCHF(self.df["High"], self.df["Low"], self.df["Close"],
                            fastk_period=self._best_parms["fastk"],
                            fastd_period=self._best_parms["fastd"])
 
-        fig = plt.figure(figsize=(20, 8))
+        chart.candlestick(self.df)
 
-        plt.subplot(211)
-        plt.title(f"Fast Stoch trade (profit: {self._best_parms['profit']})")
-        plt.plot(self.df["Close"], marker="o")
-        plt.grid()
-        plt.ylabel("Stock Price[Yen]")
-
-        plt.subplot(212)
+        fig = plt.figure(figsize=(12, 4))
+        plt.subplot(111)
         plt.plot(stochf[0], marker="o")
         plt.plot(stochf[1], marker="o")
         plt.legend([f"Fast-K {self._best_parms['fastk']}", f"Fast-D {self._best_parms['fastd']}"])
         plt.ylabel("Fast-K/D[%]")
+        plt.ylim([0, 100])
         plt.grid()
 
         plt.tight_layout()

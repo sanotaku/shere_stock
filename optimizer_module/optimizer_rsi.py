@@ -1,10 +1,13 @@
 # import libraries
+import concurrent.futures
 import sys
 from typing import List
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import talib as ta
+
+from chart import chart
 
 
 class RsiOptimizer(object):
@@ -44,12 +47,12 @@ class RsiOptimizer(object):
             sell_thres(List) : RSI sell limit[low, high]
             span_thres(List) : RSI span range[low, high]
         """
+        self._span_low = spans[0]
+        self._span_high = spans[1]
         self._buy_thres_low = buy_thres[0]
         self._buy_thres_high = buy_thres[1]
         self._sell_thres_low = sell_thres[0]
         self._sell_thres_high = sell_thres[1]
-        self._span_low = spans[0]
-        self._span_high = spans[1]
 
     def _calculate_rsi_profit(self, df, span: int, low_thres: int, high_thres: int) -> float:
         """
@@ -61,35 +64,43 @@ class RsiOptimizer(object):
         Return:
             pl_amount_retio(float) : profit and loss from RSI
         """
+
+        _df = df.copy()
+
         # set RSI cal data
-        df["RSI"] = ta.RSI(df["Close"], span)
+        _df["RSI"] = ta.RSI(_df["Close"], span)
+        _df["transaction"] = None
 
         # Args
         stock = 0
         start_asset = 10000
         asset = start_asset
+        last_close_price = 0
 
-        for i in range(len(df)):
+        for i in range(len(_df) - 1):
 
             # buy
-            if df["RSI"][i] > low_thres and df["RSI"][i - 1] < low_thres:
+            if _df["RSI"][i] > low_thres and _df["RSI"][i - 1] < low_thres:
                 if asset != 0:
-                    stock = asset / df["Close"][i]
+                    last_close_price = asset
+                    stock = asset / _df["Open"][i + 1]
                     asset = 0
-                # print(f"buy : {round(df['RSI'][i], 1)} -> {round(df['RSI'][i-1], 1): 5} | stock: {round(stock, 2)}")
+                    _df["transaction"][i + 1] = "buy"
+                    continue
 
             # sell
-            if df["RSI"][i] < high_thres and df["RSI"][i - 1] > high_thres:
+            if _df["RSI"][i] < high_thres and _df["RSI"][i - 1] > high_thres:
                 if stock != 0:
-                    asset = stock * df["Close"][i]
+                    last_close_price = 0
+                    asset = stock * _df["Open"][i + 1]
                     stock = 0
-                # print(f"sell: {round(df['RSI'][i], 1)} -> {round(df['RSI'][i-1], 1): 5} | asset: {round(asset, 2)}")
+                    _df["transaction"][i + 1] = "sell"
+                    continue
 
         # If you still have stock, sell it
-        last_asset = asset + stock * df["Close"][-1]
+        last_asset = asset + last_close_price
         pl_amount_retio = last_asset / start_asset * 100
-        # print(f"PL Amount: {round(pl_amount_retio, 2)}")
-        return pl_amount_retio
+        return pl_amount_retio, _df
 
     def run(self, df):
         """
@@ -100,29 +111,40 @@ class RsiOptimizer(object):
             result(pandas Dataframe) : 解析結果
         """
 
-        self.df = df
-
         result = []
+        _df = df.copy()
 
-        # 全パラメータをグリッドサーチ(計算量: Ο[n^3])
-        for i, span in enumerate(list(range(self._span_low, self._span_high, 1))):
-            for buy in list(range(self._buy_thres_low, self._buy_thres_high, 1)):
-                for sell in list(range(self._sell_thres_low, self._sell_thres_high, 1)):
+        def inner_thread(span):
 
-                    sys.stdout.write(f"\rRSI [{i}/{len(list(range(self._span_low, self._span_high, 1)))-1}] 計算中...")
-                    profit = self._calculate_rsi_profit(df, span, buy, sell)
+            sys.stdout.write(f"Thread START RSI Span={span}\n")
+
+            for buy in list(range(self._buy_thres_low, self._buy_thres_high + 1, 1)):
+                for sell in list(range(self._sell_thres_low, self._sell_thres_high + 1, 1)):
+
+                    profit, r_df = self._calculate_rsi_profit(_df, span, buy, sell)
 
                     result.append([span, buy, sell, profit])
 
                     if profit > self._best_parms["profit"]:
+                        self.df = r_df.copy()
                         self._best_parms["span"] = span
                         self._best_parms["buy_thres"] = buy
                         self._best_parms["sell_thres"] = sell
                         self._best_parms["profit"] = round(profit, 2)
+                        self.df["buy_thres"] = buy
+                        self.df["sell_thres"] = sell
+            return
+
+        # concurrent.futuresでマルチスレッド(並列計算)処理
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            res = executor.map(
+                inner_thread,
+                [j for j in range(self._span_low, self._span_high + 1, 1)]
+            )
 
         print("\n計算終了")
 
-        return pd.DataFrame(result, columns=["span", "buy", "sell", "profit"])
+        return pd.DataFrame(result, columns=["span", "buy", "sell", "profit"]).sort_values("profit", ascending=False)
 
     def result_params(self):
         """
@@ -135,21 +157,14 @@ class RsiOptimizer(object):
         Note: matplotlibで解析結果グラフを表示
         """
 
-        self.df["buy_thres"] = self._best_parms['buy_thres']
-        self.df["sell_thres"] = self._best_parms['sell_thres']
+        chart.candlestick(self.df)
 
-        fig = plt.figure(figsize=(20, 8))
-
-        plt.subplot(211)
-        plt.title(f"RSI trade (profit: {self._best_parms['profit']})")
-        plt.plot(self.df["Close"], marker="o")
-        plt.ylabel("Stock Price[Yen]")
-        plt.grid()
-
-        plt.subplot(212)
+        fig = plt.figure(figsize=(12, 4))
+        plt.subplot(111)
         plt.plot(ta.RSI(self.df["Close"], self._best_parms["span"]), marker="o")
         plt.plot(self.df["buy_thres"], linestyle="dashed", color="red")
         plt.plot(self.df["sell_thres"], linestyle="dashed", color="blue")
+        plt.ylim([0, 100])
         plt.ylabel("RSI[%]")
         plt.legend([f"RSI {self._best_parms['span']}", f"Buy signal {self._best_parms['buy_thres']}", f"Sell signal {self._best_parms['sell_thres']}"])
         plt.grid()

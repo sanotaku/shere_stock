@@ -1,10 +1,13 @@
 # import libraries
+import concurrent.futures
 import sys
 from typing import List, Dict
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import talib as ta
+
+from chart import chart
 
 
 class SlowStochOptimizer(object):
@@ -35,40 +38,47 @@ class SlowStochOptimizer(object):
         }
 
     def _calculate_slow_stoch_profit(self, df, fastk_period: int, slowk_period: int, slowd_period: int) -> float:
-        stoch = ta.STOCH(df["High"], df["Low"], df["Close"],
+
+        _df = df.copy()
+
+        stoch = ta.STOCH(_df["High"], _df["Low"], _df["Close"],
                          fastk_period=fastk_period,
                          slowk_period=slowd_period,
                          slowd_period=slowk_period)
 
-        df = pd.DataFrame([df["Close"].to_list(), stoch[0].to_list(), stoch[1].to_list()],
-                          columns=stoch[0].index,
-                          index=["Close", "slowK", "slowD"]).T
+        _df["slowK"] = stoch[0]
+        _df["slowD"] = stoch[1]
+        _df["transaction"] = None
 
         # Args
         stock = 0
         start_asset = 10000
         asset = start_asset
+        last_close_price = 0
 
-        for i in range(len(df)):
+        for i in range(len(_df) - 1):
             # buy
-            if df["slowD"][i] > df["slowK"][i] and df["slowD"][i - 1] < df["slowK"][i - 1]:
+            if _df["slowD"][i] > _df["slowK"][i] and _df["slowD"][i - 1] < _df["slowK"][i - 1]:
                 if asset != 0:
-                    stock = asset / df["Close"][i]
+                    last_close_price = asset
+                    stock = asset / _df["Open"][i + 1]
                     asset = 0
-                # print(f"buy ({df.index[i]}) : {round(df['slowK'][i-1], 1)}/{round(df['slowD'][i-1], 1)} -> {round(df['slowK'][i], 1)}/{round(df['slowD'][i], 1)} | stock: {round(stock, 2)}")
+                    _df["transaction"][i + 1] = "buy"
+                    continue
             # sell
-            if df["slowD"][i] < df["slowK"][i] and df["slowD"][i - 1] > df["slowK"][i - 1]:
+            if _df["slowD"][i] < _df["slowK"][i] and _df["slowD"][i - 1] > _df["slowK"][i - 1]:
                 if stock != 0:
-                    asset = stock * df["Close"][i]
+                    last_close_price = 0
+                    asset = stock * _df["Open"][i + 1]
                     stock = 0
-                # print(f"sell({df.index[i]}) : {round(df['slowK'][i-1], 1)}/{round(df['slowD'][i-1], 1)} -> {round(df['slowK'][i], 1)}/{round(df['slowD'][i], 1)} | asset: {round(asset, 2)}")
+                    _df["transaction"][i + 1] = "sell"
+                    continue
 
         # If you still have stock, sell it
-        last_asset = asset + stock * df["Close"][-1]
+        last_asset = asset + last_close_price
         pl_amount_retio = last_asset / start_asset * 100
-        # print(f"PL Amount: {round(pl_amount_retio, 2)}")
 
-        return pl_amount_retio
+        return pl_amount_retio, _df
 
     def set_params(self,
                    fastk: List[int],
@@ -90,29 +100,39 @@ class SlowStochOptimizer(object):
 
     def run(self, df):
 
-        self.df = df
-
+        _df = df.copy()
         result = []
 
-        # 全パラメータをグリッドサーチ(計算量: Ο[n^3])
-        for i, fastk in enumerate(list(range(self._fastk_low, self._fastk_high, 1))):
-            for slowk in list(range(self._slowk_low, self._slowk_high, 1)):
-                for slowd in list(range(self._slowd_low, self._slowd_high, 1)):
+        def inner_thread(fastk):
 
-                    sys.stdout.write(f"\rSlow Stoch [{i}/{len(list(range(self._fastk_low, self._fastk_high, 1)))-1}] 計算中...")
-                    profit = self._calculate_slow_stoch_profit(df, fastk, slowk, slowd)
+            sys.stdout.write(f"Thread START SlowStoch Fast-K={fastk}\n")
+
+            for slowk in list(range(self._slowk_low, self._slowk_high + 1, 1)):
+                for slowd in list(range(self._slowd_low, self._slowd_high + 1, 1)):
+
+                    # sys.stdout.write(f"\rSlow Stoch [{i+1}/{len(list(range(self._fastk_low, self._fastk_high, 1)))}] 計算中...")
+                    profit, r_df = self._calculate_slow_stoch_profit(df=_df, fastk_period=fastk, slowk_period=slowk, slowd_period=slowd)
 
                     result.append([fastk, slowk, slowd, profit])
 
                     if profit > self._best_parms["profit"]:
+                        self.df = r_df
                         self._best_parms["fastk"] = fastk
                         self._best_parms["slowk"] = slowk
                         self._best_parms["slowd"] = slowd
                         self._best_parms["profit"] = round(profit, 2)
+            return
+
+        # concurrent.futuresでマルチスレッド(並列計算)処理
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            res = executor.map(
+                inner_thread,
+                [j for j in range(self._fastk_low, self._fastk_high + 1, 1)]
+            )
 
         print("\n計算終了")
 
-        return pd.DataFrame(result, columns=["fastk", "slowk", "slowd", "profit"])
+        return pd.DataFrame(result, columns=["fastk", "slowk", "slowd", "profit"]).sort_values("profit", ascending=False)
 
     def result_graph(self):
         stoch = ta.STOCH(self.df["High"], self.df["Low"], self.df["Close"],
@@ -120,19 +140,15 @@ class SlowStochOptimizer(object):
                          slowk_period=self._best_parms["slowk"],
                          slowd_period=self._best_parms["slowd"])
 
-        fig = plt.figure(figsize=(20, 8))
+        chart.candlestick(self.df)
 
-        plt.subplot(211)
-        plt.title(f"Slow Stoch trade (profit: {self._best_parms['profit']})")
-        plt.plot(self.df["Close"][(self._best_parms["slowk"] + self._best_parms["slowk"]):], marker="o")
-        plt.grid()
-        plt.ylabel("Stock Price[Yen]")
-
-        plt.subplot(212)
+        fig = plt.figure(figsize=(12, 4))
+        plt.subplot(111)
         plt.plot(stoch[0], marker="o")
         plt.plot(stoch[1], marker="o")
         plt.legend([f"Slow-K {self._best_parms['fastk']}", f"Slow-D {self._best_parms['slowk']}/{self._best_parms['slowd']}"])
         plt.ylabel("Slow-K/D[%]")
+        plt.ylim([0, 100])
         plt.grid()
 
         plt.tight_layout()
